@@ -1,0 +1,444 @@
+---
+title: "GFCR Report - High Level Aggregation"
+subtitle: "Aggregating MERMAID GFCR data for board members"
+author: "Iain R. Caldwell"
+date: 05/31/2025
+format: 
+  html: #for website
+    embed-resources: true
+editor: visual
+code-fold: true
+code-summary: "Show the code"
+toc: true
+title-block-banner: "#f0f3f5"
+title-block-banner-color: "black"
+include-after-body: "footer.html"
+---
+
+------------------------------------------------------------------------
+
+## Context - High level aggregation of GFCR data from MERMAID 
+
+This code was created to provide high level summaries of the GFCR data in MERMAID ([https://datamermaid.org](https://datamermaid.org/)), so it can be shared at board meetings or used to communicate progress and impact across GFCR programs it easier to export GFCR data from MERMAID.
+
+------------------------------------------------------------------------
+
+## Getting GFCR data from MERMAID
+
+The first step is to download all of the current GFCR data from MERMAID. This is done using the mermaidr package (<https://data-mermaid.github.io/mermaidr/>). That package must be installed and its library loaded. The following code also requires other packages - the libraries for those packages are loaded here but this code assumes the packages have already been installed.
+
+```{r}
+#| label: Load packages and export data
+#| warning: false
+rm(list = ls()) #remove past stored objects
+options(scipen = 999) #turn off scientific notation
+
+####  Load packages and libraries ####
+## If this is the first time using mermaidr, install the package through "remotes"
+# install.packages("remotes")
+# remotes::install_github("data-mermaid/mermaidr")
+
+library(mermaidr) #package to download data from datamermaid.org
+library(tidyverse) #package that makes it easier to work with data
+library(DT) #interactive tables
+library(scales)
+
+#### Get current GFCR data from MERMAID ####
+### Find projects that are tagged with the "GFCR" organization
+gfcrProjectsTBL <- mermaid_search_projects(tags = "GFCR",
+                                           include_test_projects = F)
+
+#Remove the one called "GFCR Secretariat Test", as it is a test
+gfcrProjectsTBL <- gfcrProjectsTBL %>% 
+  filter(name != "GFCR Secretariat Test")
+
+### Get all data associated with these projects ####
+gfcrReportsTBL <- mermaid_get_gfcr_report(project = gfcrProjectsTBL)
+```
+
+------------------------------------------------------------------------
+
+## Remove any projects without any reported data
+
+If there are projects that do not have any reports (just targets) then we will remove the projects from the export.
+
+```{r}
+#| label: Remove projects with no report data
+## Create a table showing projects, #reports, #targets, and date ranges
+gfcrReportSummaryTBL <- gfcrReportsTBL$F1 %>% 
+  group_by(Project) %>% 
+  summarise(NumReports = sum(`Data Type` == "Report"),
+            NumTargets = sum(`Data Type` == "Target"),
+            YearRange =
+              ifelse(test = min(year(`Reporting Date`)) ==
+                       max(year(`Reporting Date`)),
+                     yes = as.character(min(year(`Reporting Date`))),
+                     no = paste0(min(year(`Reporting Date`)),
+                                 "-",
+                                 max(year(`Reporting Date`)))))
+
+#Return message if any have no reports and re-export without them
+if(any(gfcrReportSummaryTBL$NumReports == 0)) {
+  noReportProjects <- gfcrReportSummaryTBL %>% 
+    filter(NumReports == 0)
+  
+  # Create a message string with project-country pairs, one per line
+  project_noReport_msg <- noReportProjects %>%
+    mutate(line = Project) %>%
+    pull(line) %>%
+    paste(collapse = "\n")
+  
+  message("The following projects don't have any reports and are removed:\n", 
+          project_noReport_msg)
+  
+  gfcrProjectsTBL <- gfcrProjectsTBL %>% 
+    filter(!name %in% noReportProjects$Project)
+  
+  ### Get all data associated with the reduced list of projects ####
+  gfcrReportsTBL <- mermaid_get_gfcr_report(project = gfcrProjectsTBL)
+  
+} else {
+  message("All projects have at least one report")
+}
+```
+
+------------------------------------------------------------------------
+
+## Number of reef-positive businesses
+
+Calculate the reported and target number of reef positive businesses across all programs. This information can be found in the "BusinessesFinanceSolutions" tab.
+
+```{r}
+#| label: Calculate reported and target numbers of reef-positive businesses
+
+#This assumes that all businesses have unique names at least within a project
+reportedBusinessesTBL <- gfcrReportsTBL$BusinessesFinanceSolutions %>% 
+  filter(`Data Type` == "Report") %>% 
+  select(Project, `Business / Finance Solution`) %>% 
+  distinct()
+
+#We could all unique businesses in report and target as targets
+targetBusinessesTBL <- gfcrReportsTBL$BusinessesFinanceSolutions %>% 
+  select(Project, `Business / Finance Solution`) %>% 
+  distinct()
+
+highLevelAggTBL <- tibble(Response = "Number of reef-positive businesses",
+                          Reported = nrow(reportedBusinessesTBL),
+                          Target = nrow(targetBusinessesTBL))
+
+```
+
+------------------------------------------------------------------------
+
+## Directly supported jobs
+
+Calculate the reported and target number of directly supported jobs. This information is from GFCR indicator F6.1, after summing the numbers for men and women.
+
+```{r}
+#| label: Calculate reported and target numbers of directly supported jobs
+#| warning: false
+
+directJobsTBL <- gfcrReportsTBL$F6 %>% 
+  filter(Title != "Baseline Final") %>% #This title from Fiji is problematic
+  filter(grepl(pattern = "F6.1a|F6.1b", x = `Sub-Indicator Name`)) %>% 
+  group_by(Project, Title, `Reporting Date`, `Data Type`) %>% 
+  dplyr::summarise(NumDirectJobs = sum(Value)) %>% 
+  mutate(`Reporting Date` = as.Date(`Reporting Date`)) %>%
+  arrange(`Reporting Date`) %>%
+  group_by(Project, `Data Type`) %>%
+  dplyr::slice_tail(n = 1) %>%
+  ungroup() %>% 
+  group_by(Project) %>%
+  group_modify(~ {
+    data <- .
+    # Check if Target row exists
+    has_target <- any(data$`Data Type` == "Target")
+    has_report <- any(data$`Data Type` == "Report")
+    
+    # Get Report and Target values
+    report_value <- data %>%
+      filter(`Data Type` == "Report") %>% pull(NumDirectJobs)
+    target_value <- data %>%
+      filter(`Data Type` == "Target") %>% pull(NumDirectJobs)
+    
+    if(has_report) {
+      if(!has_target) {
+        # No target row - add one with report value
+        report_row <- data %>% filter(`Data Type` == "Report")
+        target_row <- report_row %>% mutate(`Data Type` = "Target")
+        data <- bind_rows(data, target_row)
+      } else if(report_value > target_value) {
+        # Target exists but is less than report - update target
+        data <- data %>%
+          mutate(NumDirectJobs = ifelse(`Data Type` == "Target",
+                                        report_value, NumDirectJobs))
+      }
+    }
+    data
+  }) %>%
+  ungroup() %>%
+  arrange(Project, `Data Type`)
+
+highLevelAggTBL <- highLevelAggTBL %>% 
+  bind_rows(tibble(Response = "Directly supported jobs",
+                   Reported = sum(directJobsTBL$NumDirectJobs
+                                  [directJobsTBL$`Data Type` == "Report"]),
+                   Target = sum(directJobsTBL$NumDirectJobs
+                                [directJobsTBL$`Data Type` == "Target"])))
+```
+
+------------------------------------------------------------------------
+
+## Community members with supported resilience
+
+Calculate the reported and target number of total indirect beneficiaries. This information is from GFCR indicator F7.2, after summing the numbers for men and women.
+
+```{r}
+#| label: Calculate reported and target numbers of indirectl beneficiaries
+#| warning: false
+
+indirectBenTBL <- gfcrReportsTBL$F7 %>% 
+  filter(Title != "Baseline Final") %>% #This title from Fiji is problematic
+  filter(grepl(pattern = "F7.2a|F7.2b", x = `Sub-Indicator Name`)) %>% 
+  group_by(Project, Title, `Reporting Date`, `Data Type`) %>% 
+  dplyr::summarise(NumIndirectBen = sum(Value)) %>% 
+  mutate(`Reporting Date` = as.Date(`Reporting Date`)) %>%
+  arrange(`Reporting Date`) %>%
+  group_by(Project, `Data Type`) %>%
+  dplyr::slice_tail(n = 1) %>%
+  ungroup() %>% 
+  group_by(Project) %>%
+  group_modify(~ {
+    data <- .
+    # Check if Target row exists
+    has_target <- any(data$`Data Type` == "Target")
+    has_report <- any(data$`Data Type` == "Report")
+    
+    # Get Report and Target values
+    report_value <- data %>%
+      filter(`Data Type` == "Report") %>% pull(NumIndirectBen)
+    target_value <- data %>%
+      filter(`Data Type` == "Target") %>% pull(NumIndirectBen)
+    
+    if(has_report) {
+      if(!has_target) {
+        # No target row - add one with report value
+        report_row <- data %>% filter(`Data Type` == "Report")
+        target_row <- report_row %>% mutate(`Data Type` = "Target")
+        data <- bind_rows(data, target_row)
+      } else if(report_value > target_value) {
+        # Target exists but is less than report - update target
+        data <- data %>%
+          mutate(NumIndirectBen = ifelse(`Data Type` == "Target",
+                                         report_value, NumIndirectBen))
+      }
+    }
+    data
+  }) %>%
+  ungroup() %>%
+  arrange(Project, `Data Type`)
+
+highLevelAggTBL <- highLevelAggTBL %>% 
+  bind_rows(tibble(Response = "Community members with supported resilience",
+                   Reported = sum(indirectBenTBL$NumIndirectBen
+                                  [indirectBenTBL$`Data Type` == "Report"]),
+                   Target = sum(indirectBenTBL$NumIndirectBen
+                                [indirectBenTBL$`Data Type` == "Target"])))
+```
+
+------------------------------------------------------------------------
+
+## Coral reef area under improved management
+
+Calculate the reported and target coral reef area in the GFCR programs based on GFCR indicator F1. I am assuming the preferred unit is hectares so will convert it to that.
+
+```{r}
+#| label: Calculate reported and target coral reef area improved
+coralReefAreaTBL <- gfcrReportsTBL$F1 %>% 
+  select(Project, Title, `Reporting Date`, `Data Type`, `Area (km2)`) %>% 
+  filter(Title != "Baseline Final") %>% #This title from Fiji is problematic
+  mutate(`Reporting Date` = as.Date(`Reporting Date`)) %>%
+  arrange(`Reporting Date`) %>%
+  group_by(Project, `Data Type`) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>% 
+  mutate(Area_ha = `Area (km2)` * 100) %>% 
+  select(-`Area (km2)`) %>% 
+  group_by(Project) %>%
+  group_modify(~ {
+    data <- .
+    # Check if Target row exists
+    has_target <- any(data$`Data Type` == "Target")
+    has_report <- any(data$`Data Type` == "Report")
+    
+    # Get Report and Target values
+    report_value <- data %>%
+      filter(`Data Type` == "Report") %>% pull(Area_ha)
+    target_value <- data %>%
+      filter(`Data Type` == "Target") %>% pull(Area_ha)
+    
+    if(has_report) {
+      if(!has_target) {
+        # No target row - add one with report value
+        report_row <- data %>% filter(`Data Type` == "Report")
+        target_row <- report_row %>% mutate(`Data Type` = "Target")
+        data <- bind_rows(data, target_row)
+      } else if(report_value > target_value) {
+        # Target exists but is less than report - update target
+        data <- data %>%
+          mutate(Area_ha = ifelse(`Data Type` == "Target",
+                                  report_value, Area_ha))
+      }
+    }
+    data
+  }) %>%
+  ungroup() %>%
+  arrange(Project, `Data Type`)
+
+
+highLevelAggTBL <- highLevelAggTBL %>% 
+  bind_rows(tibble(Response = "Coral reef area under improved management (ha)",
+                   Reported = sum(coralReefAreaTBL$Area_ha
+                                  [coralReefAreaTBL$`Data Type` == "Report"]),
+                   Target = sum(coralReefAreaTBL$Area_ha
+                                [coralReefAreaTBL$`Data Type` == "Target"])))
+```
+
+------------------------------------------------------------------------
+
+## Area of Marine Protected Areas (MPAs) and locally managed areas.
+
+Calculate the reported and target areas across the GFCR programs that are either in protected areas (F2.1b: Total area of MPAs and OECMs) or locally managed areas (F2.2b). I am assuming the preferred unit is hectares so will convert it to that.
+
+```{r}
+#| label: Calculate reported and target area that is protected or locally managed
+#| warning: false
+
+protectedAreaTBL <- gfcrReportsTBL$F2 %>% 
+  filter(Title != "Baseline Final") %>% #This title from Fiji is problematic
+  filter(grepl(pattern = "F2.1b|F2.2b", x = `Sub-Indicator Name`)) %>% 
+  group_by(Project, Title, `Reporting Date`, `Data Type`) %>% 
+  dplyr::summarize(Area_ha = sum(`Area (km2)`) * 100) %>%
+  mutate(`Reporting Date` = as.Date(`Reporting Date`)) %>%
+  arrange(`Reporting Date`) %>%
+  group_by(Project, `Data Type`) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>% 
+  group_by(Project) %>%
+  group_modify(~ {
+    data <- .
+    # Check if Target row exists
+    has_target <- any(data$`Data Type` == "Target")
+    has_report <- any(data$`Data Type` == "Report")
+    
+    # Get Report and Target values
+    report_value <- data %>%
+      filter(`Data Type` == "Report") %>% pull(Area_ha)
+    target_value <- data %>%
+      filter(`Data Type` == "Target") %>% pull(Area_ha)
+    
+    if(has_report) {
+      if(!has_target) {
+        # No target row - add one with report value
+        report_row <- data %>% filter(`Data Type` == "Report")
+        target_row <- report_row %>% mutate(`Data Type` = "Target")
+        data <- bind_rows(data, target_row)
+      } else if(report_value > target_value) {
+        # Target exists but is less than report - update target
+        data <- data %>%
+          mutate(Area_ha = ifelse(`Data Type` == "Target",
+                                  report_value, Area_ha))
+      }
+    }
+    data
+  }) %>%
+  ungroup() %>%
+  arrange(Project, `Data Type`)
+
+highLevelAggTBL <- highLevelAggTBL %>% 
+  bind_rows(tibble(Response = "Area of protected and locally managed areas (ha)",
+                   Reported = sum(protectedAreaTBL$Area_ha
+                                  [protectedAreaTBL$`Data Type` == "Report"]),
+                   Target = sum(protectedAreaTBL$Area_ha
+                                [protectedAreaTBL$`Data Type` == "Target"])))
+```
+
+------------------------------------------------------------------------
+
+## Leverage in public and private finance
+
+In this section, we calculate the reported and target amounts for public and private investments across all GFCR programs. These values come from the "Investments" tab of the GFCR data and are in US dollars.
+
+```{r}
+#| label: Calculate total from public and private investments
+
+publicPrivateInvestmentsTBL <- gfcrReportsTBL$Investments %>% 
+  filter(Title != "Baseline Final") %>% #This title from Fiji is problematic
+  filter(`Investment Source` %in% c("Public", "Private")) %>% 
+  mutate(`Reporting Date` = as.Date(`Reporting Date`)) %>%
+  arrange(`Reporting Date`) %>%
+  group_by(Project, `Data Type`, `Business / Finance Solution`, 
+           `Sustainable Finance Mechanisms`,
+           Sector, `Investment Source`, `Investment Type`) %>%
+  slice_tail(n = 1) %>%
+  ungroup() %>% 
+  group_by(Project, `Business / Finance Solution`, 
+           `Sustainable Finance Mechanisms`,
+           Sector, `Investment Source`, `Investment Type`) %>%
+  group_modify(~ {
+    data <- .
+    # Check if Target row exists
+    has_target <- any(data$`Data Type` == "Target")
+    has_report <- any(data$`Data Type` == "Report")
+    
+    # Get Report and Target values
+    report_value <- data %>%
+      filter(`Data Type` == "Report") %>% pull(`Investment Amount`)
+    target_value <- data %>%
+      filter(`Data Type` == "Target") %>% pull(`Investment Amount`)
+    
+    if(has_report) {
+      if(!has_target) {
+        # No target row - add one with report value
+        report_row <- data %>% filter(`Data Type` == "Report")
+        target_row <- report_row %>% mutate(`Data Type` = "Target")
+        data <- bind_rows(data, target_row)
+      } else if(report_value > target_value) {
+        # Target exists but is less than report - update target
+        data <- data %>%
+          mutate(`Investment Amount` = ifelse(`Data Type` == "Target",
+                                              report_value, `Investment Amount`))
+      }
+    }
+    data
+  }) %>%
+  ungroup() %>%
+  arrange(Project, `Data Type`)
+
+highLevelAggTBL <- highLevelAggTBL %>% 
+  bind_rows(tibble(Response = "Leverage in public and private finance ($)",
+                   Reported = sum(publicPrivateInvestmentsTBL$`Investment Amount`
+                                  [publicPrivateInvestmentsTBL$`Data Type` == "Report"]),
+                   Target = sum(publicPrivateInvestmentsTBL$`Investment Amount`
+                                [publicPrivateInvestmentsTBL$`Data Type` == "Target"])))
+```
+
+------------------------------------------------------------------------
+
+## Calculate progress and save the results
+
+Now that we have combined all of the reported and target numbers for the six metrics of interest, we will calculate the progress towards each. We will then save a copy of the file as a CSV file that can be shared. Another step that could be taken after this one is to create a mock-up of a slide to display these numbers.
+
+```{r}
+#| label: Calculate progress and save results as a CSV
+
+highLevelAggTBL <- highLevelAggTBL %>% 
+  mutate(Progress = Reported/Target*100)
+
+write_csv(x = highLevelAggTBL,
+          file = "../data/GFCR_HighLevelAggregation_BoardMemberMetrics.csv")
+
+#Display interactive version of table
+datatable(highLevelAggTBL,
+          options = list(pageLength = 10, autoWidth = TRUE))
+```
